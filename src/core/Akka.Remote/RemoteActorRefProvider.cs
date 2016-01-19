@@ -45,13 +45,16 @@ namespace Akka.Remote
 
         private Internals RemoteInternals
         {
-            get
-            {
-                return _internals ??
-                       (_internals =
-                           new Internals(new Remoting(_system, this), _system.Serialization,
-                               new RemoteSystemDaemon(_system, RootPath / "remote", SystemGuardian, _remotingTerminator, _log)));
-            }
+            get { return _internals ?? (_internals = CreateInternals()); }
+        }
+
+        private Internals CreateInternals()
+        {
+            var internals =
+                new Internals(new Remoting(_system, this), _system.Serialization,
+                    new RemoteSystemDaemon(_system, RootPath/"remote", SystemGuardian, _remotingTerminator, _log));
+            _local.RegisterExtraName("remote", internals.RemoteDaemon);
+            return internals;
         }
 
         public IInternalActorRef RemoteDaemon { get { return RemoteInternals.RemoteDaemon; } }
@@ -530,22 +533,26 @@ namespace Akka.Remote
             protected override void TellInternal(object message, IActorRef sender)
             {
                 var send = message as EndpointManager.Send;
+                var deadLetter = message as DeadLetter;
                 if (send != null)
                 {
-                    // else ignore: it is a reliably delivered message that might be retried later, and it has not yet deserved
-                    // the dead letter status
-                    //TODO: Seems to have started causing endless cycle of messages (and stack overflow)
-                    //if (send.Seq == null) Tell(message, sender);
-                    return;
+                    if (send.Seq == null)
+                    {
+                        base.TellInternal(send.Message, send.SenderOption ?? ActorRefs.NoSender);
+                    }
                 }
-                var deadLetter = message as DeadLetter;
-                if (deadLetter != null)
+                else if (deadLetter?.Message is EndpointManager.Send)
                 {
-                    // else ignore: it is a reliably delivered message that might be retried later, and it has not yet deserved
-                    // the dead letter status
-                    //TODO: if(deadLetter.Message)
+                    var deadSend = (EndpointManager.Send) deadLetter.Message;
+                    if (deadSend.Seq == null)
+                    {
+                        base.TellInternal(deadSend.Message, deadSend.SenderOption ?? ActorRefs.NoSender);
+                    }
                 }
-
+                else
+                {
+                    base.TellInternal(message, sender);
+                }               
             }
         }
     }

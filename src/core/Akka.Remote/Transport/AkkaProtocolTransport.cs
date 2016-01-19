@@ -37,17 +37,22 @@ namespace Akka.Remote.Transport
     }
 
     /// <summary>
-    /// An <see cref="AkkaException"/> that can occur during the course of an Akka Protocol handshake.
+    /// This exception is thrown when an error occurred during the Akka protocol handshake.
     /// </summary>
     public class AkkaProtocolException : AkkaException
     {
         /// <summary>
-        /// Constructor.
+        /// Initializes a new instance of the <see cref="AkkaProtocolException"/> class.
         /// </summary>
-        /// <param name="message">The error message.</param>
-        /// <param name="cause">The internal exception (null by default.)</param>
+        /// <param name="message">The message that describes the error.</param>
+        /// <param name="cause">The exception that is the cause of the current exception.</param>
         public AkkaProtocolException(string message, Exception cause = null) : base(message, cause) { }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AkkaProtocolException"/> class.
+        /// </summary>
+        /// <param name="info">The <see cref="SerializationInfo"/> that holds the serialized object data about the exception being thrown.</param>
+        /// <param name="context">The <see cref="StreamingContext"/> that contains contextual information about the source or destination.</param>
         protected AkkaProtocolException(SerializationInfo info, StreamingContext context)
             : base(info, context)
         {
@@ -228,7 +233,7 @@ namespace Akka.Remote.Transport
 
     internal sealed class HandshakeInfo
     {
-        public HandshakeInfo(Address origin, long uid)
+        public HandshakeInfo(Address origin, int uid)
         {
             Origin = origin;
             Uid = uid;
@@ -236,7 +241,7 @@ namespace Akka.Remote.Transport
 
         public Address Origin { get; private set; }
 
-        public long Uid { get; private set; }
+        public int Uid { get; private set; }
 
         public override bool Equals(object obj)
         {

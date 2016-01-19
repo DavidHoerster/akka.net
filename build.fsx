@@ -1,4 +1,4 @@
-#I @"packages/build/FAKE/tools"
+﻿#I @"src/packages/FAKE/tools"
 #r "FakeLib.dll"
 #r "System.Xml.Linq"
 
@@ -52,6 +52,7 @@ printfn "Assembly version: %s\nNuget version; %s\n" release.AssemblyVersion rele
 
 let binDir = "bin"
 let testOutput = FullName "TestResults"
+let perfOutput = FullName "PerfResults"
 
 let nugetDir = binDir @@ "nuget"
 let workingDir = binDir @@ "build"
@@ -59,6 +60,14 @@ let libDir = workingDir @@ @"lib\net45\"
 let nugetExe = FullName @"src\.nuget\NuGet.exe"
 let docDir = "bin" @@ "doc"
 
+open Fake.RestorePackageHelper
+Target "RestorePackages" (fun _ -> 
+     "./src/Akka.sln"
+     |> RestoreMSSolutionPackages (fun p ->
+         { p with
+             OutputPath = "./src/packages"
+             Retries = 4 })
+ )
 
 //--------------------------------------------------------------------------------
 // Clean build results
@@ -177,6 +186,8 @@ Target "CopyOutput" <| fun _ ->
       "contrib/loggers/Akka.Logger.slf4net"
       "contrib/loggers/Akka.Logger.NLog" 
       "contrib/loggers/Akka.Logger.Serilog" 
+      "contrib/loggers/Akka.Logger.CommonLogging"
+      "contrib/loggers/Akka.Logger.log4net" 
       "contrib/dependencyinjection/Akka.DI.Core"
       "contrib/dependencyinjection/Akka.DI.AutoFac"
       "contrib/dependencyinjection/Akka.DI.CastleWindsor"
@@ -186,6 +197,9 @@ Target "CopyOutput" <| fun _ ->
       "contrib/testkits/Akka.TestKit.Xunit" 
       "contrib/testkits/Akka.TestKit.NUnit" 
       "contrib/testkits/Akka.TestKit.Xunit2" 
+      "contrib/serializers/Akka.Serialization.Wire" 
+      "contrib/cluster/Akka.Cluster.Tools"
+      "contrib/cluster/Akka.Cluster.Sharding"
       ]
     |> List.iter copyOutput
 
@@ -221,22 +235,22 @@ Target "RunTests" <| fun _ ->
         {p with
             DisableShadowCopy = true; 
             OutputFile = testOutput + @"\NUnitTestResults.xml"})
-    let xunitToolPath = findToolInSubPath "xunit.console.exe" "src/packages/xunit.runner.console*/tools"
 
+    let xunitToolPath = findToolInSubPath "xunit.console.exe" "src/packages/xunit.runner.console*/tools"
+    printfn "Using XUnit runner: %s" xunitToolPath
     xUnit2
         (fun p -> { p with XmlOutputPath = Some (testOutput + @"\XUnitTestResults.xml"); HtmlOutputPath = Some (testOutput + @"\XUnitTestResults.HTML"); ToolPath = xunitToolPath; TimeOut = System.TimeSpan.FromMinutes 30.0; Parallel = ParallelMode.NoParallelization })
-
         xunitTestAssemblies
 
 Target "RunTestsMono" <| fun _ ->  
     let xunitTestAssemblies = !! "src/**/bin/Release Mono/*.Tests.dll"
 
     mkdir testOutput
-    let xunitToolPath = findToolInSubPath "xunit.console.exe" "src/packages/xunit.runner.console*/tools"
 
+    let xunitToolPath = findToolInSubPath "xunit.console.exe" "src/packages/xunit.runner.console*/tools"
+    printfn "Using XUnit runner: %s" xunitToolPath
     xUnit2
         (fun p -> { p with XmlOutputPath = Some (testOutput + @"\XUnitTestResults.xml"); HtmlOutputPath = Some (testOutput + @"\XUnitTestResults.HTML"); ToolPath = xunitToolPath; TimeOut = System.TimeSpan.FromMinutes 30.0; Parallel = ParallelMode.NoParallelization })
-
         xunitTestAssemblies
 
 Target "MultiNodeTests" <| fun _ ->
@@ -267,6 +281,40 @@ Target "MultiNodeTests" <| fun _ ->
     
     multiNodeTestAssemblies |> Seq.iter (runMultiNodeSpec)
 
+//--------------------------------------------------------------------------------
+// NBench targets 
+//--------------------------------------------------------------------------------
+Target "NBench" <| fun _ ->
+    let testSearchPath =
+        let assemblyFilter = getBuildParamOrDefault "spec-assembly" String.Empty
+        sprintf "src/**/bin/Release/*%s*.Tests.Performance.dll" assemblyFilter
+
+    mkdir perfOutput
+    let nbenchTestPath = findToolInSubPath "NBench.Runner.exe" "src/packges/NBench.Runner*"
+    let nbenchTestAssemblies = !! testSearchPath
+    printfn "Using NBench.Runner: %s" nbenchTestPath
+
+    let runNBench assembly =
+        let spec = getBuildParam "spec"
+
+        let args = new StringBuilder()
+                |> append assembly
+                |> append (sprintf "output-directory=\"%s\"" perfOutput)
+                |> toText
+
+        let result = ExecProcess(fun info -> 
+            info.FileName <- nbenchTestPath
+            info.WorkingDirectory <- (Path.GetDirectoryName (FullName nbenchTestPath))
+            info.Arguments <- args) (System.TimeSpan.FromMinutes 15.0) (* Reasonably long-running task. *)
+        if result <> 0 then failwithf "NBench.Runner failed. %s %s" nbenchTestPath args
+    
+    nbenchTestAssemblies |> Seq.iter (runNBench)
+
+//--------------------------------------------------------------------------------
+// Clean NBench output
+Target "CleanPerf" <| fun _ ->
+    DeleteDir perfOutput
+
 
 //--------------------------------------------------------------------------------
 // Nuget targets 
@@ -291,6 +339,7 @@ module Nuget =
       match project with
       | "Akka.Cluster" -> preReleaseVersion
       | persistence when persistence.StartsWith("Akka.Persistence") -> preReleaseVersion
+      | "Akka.Serialization.Wire" -> preReleaseVersion
       | _ -> release.NugetVersion
 
 open Nuget
@@ -315,18 +364,15 @@ let createNugetPackages _ =
     ensureDirectory nugetDir
     for nuspec in !! "src/**/*.nuspec" do
         printfn "Creating nuget packages for %s" nuspec
-
-        let project = Path.GetFileNameWithoutExtension nuspec 
         
-        let workingDir = workingDir </> project
-
         CleanDir workingDir
 
+        let project = Path.GetFileNameWithoutExtension nuspec 
         let projectDir = Path.GetDirectoryName nuspec
         let projectFile = (!! (projectDir @@ project + ".*sproj")) |> Seq.head
         let releaseDir = projectDir @@ @"bin\Release"
-        let packages = projectDir @@ "paket.references"
-        let packageDependencies = if (fileExists packages) then (Paket.GetDependenciesForReferencesFile packages |> Seq.toList) else []
+        let packages = projectDir @@ "packages.config"
+        let packageDependencies = if (fileExists packages) then (getDependencies packages) else []
         let dependencies = packageDependencies @ getAkkaDependency project
         let releaseVersion = getProjectVersion project
 
@@ -373,6 +419,8 @@ let createNugetPackages _ =
         // Create both normal nuget package and symbols nuget package. 
         // Uses the files we copied to workingDir and outputs to nugetdir
         pack nugetDir NugetSymbolPackage.Nuspec
+        
+        removeDir workingDir
 
 let publishNugetPackages _ = 
     let rec publishPackage url accessKey trialsLeft packageFile =
@@ -404,12 +452,18 @@ let publishNugetPackages _ =
                 !! (nugetDir @@ "*.nupkg") 
                 -- (nugetDir @@ "*.symbols.nupkg") |> Seq.sortBy(fun x -> x.ToLower())
             for package in normalPackages do
-                publishPackage (getBuildParamOrDefault "nugetpublishurl" "") (getBuildParam "nugetkey") 3 package
+                try
+                    publishPackage (getBuildParamOrDefault "nugetpublishurl" "") (getBuildParam "nugetkey") 3 package
+                with exn ->
+                    printfn "%s" exn.Message
 
         if shouldPushSymbolsPackages then
             let symbolPackages= !! (nugetDir @@ "*.symbols.nupkg") |> Seq.sortBy(fun x -> x.ToLower())
             for package in symbolPackages do
-                publishPackage (getBuildParam "symbolspublishurl") (getBuildParam "symbolskey") 3 package
+                try
+                    publishPackage (getBuildParam "symbolspublishurl") (getBuildParam "symbolskey") 3 package
+                with exn ->
+                    printfn "%s" exn.Message
 
 
 Target "Nuget" <| fun _ -> 
@@ -541,11 +595,14 @@ Target "HelpMultiNodeTests" <| fun _ ->
 //--------------------------------------------------------------------------------
 
 // build dependencies
-"Clean" ==> "AssemblyInfo" ==> "Build" ==> "CopyOutput" ==> "BuildRelease"
+"Clean" ==> "AssemblyInfo" ==> "RestorePackages" ==> "Build" ==> "CopyOutput" ==> "BuildRelease"
 
 // tests dependencies
 "CleanTests" ==> "RunTests"
-"BuildRelease" ==> "CleanTests" ==> "MultiNodeTests"
+"CleanTests" ==> "MultiNodeTests"
+
+// NBench dependencies
+"CleanPerf" ==> "NBench"
 
 // nuget dependencies
 "CleanNuget" ==> "CreateNuget"
@@ -558,6 +615,7 @@ Target "All" DoNothing
 "BuildRelease" ==> "All"
 "RunTests" ==> "All"
 "MultiNodeTests" ==> "All"
+"NBench" ==> "All"
 "Nuget" ==> "All"
 
 Target "AllTests" DoNothing //used for Mono builds, due to Mono 4.0 bug with FAKE / NuGet https://github.com/fsharp/fsharp/issues/427
